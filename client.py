@@ -3,7 +3,7 @@ import capnp
 import sys
 import threading
 import time
-import Queue
+import queue
 from chatroom_capnp import Chat, Message
 
 
@@ -132,7 +132,7 @@ if __name__ == '__main__':
     client = capnp.TwoPartyClient(SERVER_ADDRESS)
     chat = client.bootstrap().cast_as(Chat)
     commands = Commands()
-    command_queue = Queue.Queue()
+    command_queue = queue.Queue()
     command_lock = threading.Lock()
     user = User()
     def get_input():
@@ -162,7 +162,7 @@ if __name__ == '__main__':
 
         try:
             command = command_queue.get(False)
-        except Queue.Empty:
+        except queue.Empty:
             command = None
             command_lock.release()
 
