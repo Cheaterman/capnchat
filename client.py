@@ -91,8 +91,10 @@ class User(object):
             author=self.nickname,
             content=message,
         )
-        chat.sendMessage(self.current_room, message).wait()
-        self.last_message = message
+        self.last_message = message = chat.sendMessage(
+            self.current_room.name,
+            message
+        ).wait().new_message
 
     def print_message(self, message):
         print('{}: {}'.format(message.author, message.content))
@@ -104,16 +106,14 @@ class User(object):
     def update_room(self):
         if not self.current_room or not self.last_message:
             return
-        self.current_room = room = self.get_room(self.current_room.name)
-        found = False
-        results = []
-        for message in room.messages:
-            if found:
-                results.append(message)
-            if message.to_dict() == self.last_message.to_dict():
-                found = True
+        results = chat.getMessagesAfter(
+            self.current_room.name, self.last_message
+        ).wait().messages
         if results:
             print('\r', end='')
+            new_room = self.current_room.as_builder()
+            new_room.messages = list(new_room.messages) + list(results)
+            self.current_room = new_room.as_reader()
             for result in results:
                 self.print_message(result)
             print(commands.prompt(

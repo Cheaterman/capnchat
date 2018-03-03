@@ -5,7 +5,8 @@ interface Chat {
     getAllRooms @4 () -> (rooms :List(Room));
     getRoom @1 (name :Text) -> (room :Room);
     getMessages @2 (name :Text) -> (messages :List(Message));
-    sendMessage @3 (room :Room, message :Message);
+    getMessagesAfter @5 (name :Text, message :Message) -> (messages :List(Message));
+    sendMessage @3 (name :Text, message :Message) -> (new_message :Message);
 }
 
 struct Room {
