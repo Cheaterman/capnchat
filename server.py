@@ -5,6 +5,9 @@ import uuid
 from chatroom_capnp import Chat, Room
 
 
+SERVER_ADDRESS = '0.0.0.0:50000'
+
+
 class RoomLoader(object):
     def __init__(self):
         self.loaded_rooms = {}
@@ -92,5 +95,6 @@ class ChatServer(Chat.Server):
 
 if __name__ == '__main__':
     loader = RoomLoader()
-    server = capnp.TwoPartyServer('*:50000', bootstrap=ChatServer())
+    print('Listening on %s' % SERVER_ADDRESS)
+    server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=ChatServer())
     server.run_forever()
