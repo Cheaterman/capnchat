@@ -138,7 +138,7 @@ if __name__ == '__main__':
     def get_input():
         while True:
             while command_lock.locked():
-                time.sleep(.01)
+                time.sleep(.001)
             try:
                 command_queue.put(
                     input(commands.prompt(
