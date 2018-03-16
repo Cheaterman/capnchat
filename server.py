@@ -2,7 +2,11 @@ import capnp
 import glob
 import os
 import uuid
-from chatroom_capnp import Chat, Room
+from chatroom_capnp import (
+    Client as Capnp_Client,
+    Server as Capnp_Server,
+    Room as Capnp_Room,
+)
 
 
 SERVER_ADDRESS = '0.0.0.0:50000'
@@ -28,10 +32,10 @@ class RoomLoader(object):
         savefile_name = self.savefile_name(name)
         if os.path.exists(savefile_name):
             print('Loading room: {}'.format(name))
-            room = Room.read(open(savefile_name, 'rb'))
+            room = Capnp_Server.SavedRoom.read(open(savefile_name, 'rb'))
         else:
             print('New room: {}'.format(name))
-            room = Room.new_message(
+            room = Capnp_Server.SavedRoom.new_message(
                 id=uuid.uuid4().int & 0xFFFFFFFF,
                 name=name,
                 messages=[],
@@ -51,50 +55,131 @@ class RoomLoader(object):
         return name + '.chatroom.sav'
 
 
-class ChatServer(Chat.Server):
-    def save(self, room, _context, **kwargs):
-        loader.persist(room)
+class Room(Capnp_Room.Server):
+    def __init__(self, chatroom):
+        self.chatroom = chatroom
 
-    def getAllRooms(self, _context, **kwargs):
-        return loader.restore_all()
+    def get(self, _context, **kwargs):
+        return self.chatroom.messages
 
-    def getRoom(self, name, _context, **kwargs):
-        return loader.restore(name)
-
-    def getMessages(self, name, _context, **kwargs):
-        return self.getRoom(name, _context).messages
-
-    def getMessagesAfter(self, name, message, _context, **kwargs):
-        message_dict = message.to_dict()
-        found = False
-        results = []
-        for message in self.getMessages(name, _context):
-            if found:
-                results.append(message)
-            if(
-                not found and
-                message.to_dict() == message_dict
-            ):
-                found = True
-        if(
-            not results and
-            message.to_dict() != message_dict
-        ):
-            results = list(room.messages)
-        return results
-
-    def sendMessage(self, name, message, _context, **kwargs):
+    def send(self, message, _context, **kwargs):
         message = message.as_builder()
-        message.id = uuid.uuid4().int & 0xFFFFFFFF
-        room = self.getRoom(name, _context)
-        new_room = room.as_builder()
-        new_room.messages = list(room.messages) + [message]
-        self.save(new_room.as_reader(), _context)
-        return message
+        self.chatroom.messages.append(message)
+        for client in self.chatroom.users:
+            client.send(message).wait()
+
+    def names(self, _context, **kwargs):
+        return self.chatroom.users
+
+
+class ChatRoom(object):
+    def __init__(self, **kwargs):
+        if 'room' in kwargs:
+            room = kwargs.pop('room').as_builder()
+            id, name, messages = (
+                room.id, room.name, room.messages
+            )
+        elif 'id' in kwargs and 'name' in kwargs and 'messages' in kwargs:
+            id, name, messages = (
+                kwargs.pop('id'), kwargs.pop('name'), kwargs.pop('messages')
+            )
+        else:
+            raise TypeError(
+                "__init__() missing 1 required keyword argument: 'room'; "
+                "or 3 required keyword arguments: 'id', 'name', 'messages'"
+            )
+        self.id = id
+        self.name = name
+        self.messages = list(messages)
+        self.users = []
+        self.room = Room(chatroom=self)
+
+    def as_message(self):
+        return Capnp_Server.ChatRoom.new_message(
+            id=self.id,
+            name=self.name,
+            room=self.room,
+        )
+
+
+class Client(object):
+    def __init__(self, name, client):
+        self.id = uuid.uuid4().int & 0xFFFFFFFF
+        self.name = name
+        self._client = client
+        self.joined_rooms = []
+
+    def send(self, message):
+        print('Sending message to %s (%d): <%s> %s' % (
+            self.name,
+            self.id,
+            message.author,
+            message.content,
+        ))
+        return self._client.receive(message)
+
+
+class Server(Capnp_Server.Server):
+    def __init__(self, **kwargs):
+        self.clients = {}
+        self.rooms = {}
+        self.loader = loader = RoomLoader()
+        loader.restore_all()
+
+
+    def get_room(self, name):
+        if name not in self.rooms:
+            self.rooms[name] = ChatRoom(room=self.loader.restore(name))
+        return self.rooms[name]
+
+    def login(self, client, name, _context, **kwargs):
+        if not name or name in [user.name for user in self.clients.values()]:
+            return
+
+        client = Client(name, client)
+
+        print('Got new client %s (%d)' % (name, client.id))
+
+        self.clients[client.id] = client
+        return client.id
+
+    class login_required(object):
+        def __new__(cls, func):
+            def _func(self, client_id, **kwargs):
+                if client_id not in self.clients:
+                    return
+                return func(self, client_id, **kwargs)
+            return _func
+
+    @login_required
+    def list(self, client_id, _context, **kwargs):
+        return [
+            self.get_room(saved_room.name).as_message()
+            for saved_room in self.loader.restore_all()
+        ]
+
+    @login_required
+    def join(self, client_id, name, _context, **kwargs):
+        chatroom = self.get_room(name)
+        proxy_client = self.clients[client_id]
+
+        if chatroom not in proxy_client.joined_rooms:
+            proxy_client.joined_rooms.append(chatroom)
+
+        if proxy_client not in chatroom.users:
+            chatroom.users.append(proxy_client)
+
+        return chatroom.as_message()
+
+    @login_required
+    def nick(self, client_id, name, _context, **kwargs):
+        if not name:
+            return
+
+        self.clients[client_id].name = name
 
 
 if __name__ == '__main__':
-    loader = RoomLoader()
     print('Listening on %s' % SERVER_ADDRESS)
-    server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=ChatServer())
+    server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=Server())
     server.run_forever()

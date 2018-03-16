@@ -4,13 +4,17 @@ import sys
 import threading
 import time
 import queue
-from chatroom_capnp import Chat, Message
+from chatroom_capnp import Client as Capnp_Client, Server, Message
 
 
 SERVER_ADDRESS = 'tms-server.com:50000'
+SERVER_ADDRESS = 'localhost:50000'
 
 
 class Commands(object):
+    def __init__(self, user, **kwargs):
+        self.user = user
+
     def prompt(self, channel):
         return '{}> '.format(('#' + channel) if channel else '')
 
@@ -46,42 +50,74 @@ class Commands(object):
             raise ValueError('Unknown command "%s"!' % message)
 
     def on_nick(self, nickname):
-        user.nickname = nickname
+        self.user.nick(nickname)
 
     def on_join(self, room):
-        user.join(room)
+        self.user.join(room)
 
     def on_list(self):
-        for room in chat.getAllRooms().wait().rooms:
-            print('{}: {}'.format(room.id, room.name))
+        self.user.list()
 
     def on_quit(self):
         global quit
         quit = True
 
 
+class Client(Capnp_Client.Server):
+    def __init__(self, user):
+        self.user = user
+
+    def receive(self, message):
+        print('Got message: <%s> %s' % (message.author, message.content))
+        self.user.print_message(message)
+
+
 class User(object):
-    def __init__(self, nickname='', joined_rooms=[], **kwargs):
+    def __init__(self, chat, nickname='', joined_rooms=[], **kwargs):
+        self.chat = chat
         self.nickname = nickname
-        self.joined_rooms = {
-            room: chat.getRoom(room).wait().room for room in joined_rooms
-        }
+        self.commands = Commands(user=self)
+
+        self.joined_rooms = {}
+        if joined_rooms:
+            rooms = chat.list().wait().rooms
+            for room in joined_rooms:
+                for chatroom in rooms:
+                    if chatroom.name == room:
+                        self.joined_rooms[room] = chatroom.room
+                        break
+
+        self.id = None
+        self.client = None
         self.current_room = None
-        self.last_message = None
+
+    def nick(self, name):
+        self.nickname = name
+        if not self.client:
+            self.client = client = Client(self)
+            self.id = self.chat.login(client, name).wait().id
+        else:
+            self.chat.nick(self.client, name).wait()
 
     def join(self, room):
-        if not self.nickname:
+        if not self.client:
             print("Can't join a room without a nickname!")
             return
         print('Joining room "{}"'.format(room))
-        room = self.get_room(room)
-        for message in room.messages:
+        chat_room = self.get_room(room)
+        messages = chat_room.room.get().wait().messages
+        for message in messages:
             self.print_message(message)
-        if not room.messages:
+        if not messages:
             print('Empty channel!')
-        else:
-            self.last_message = message
-        self.current_room = room
+        self.current_room = chat_room
+
+    def list(self):
+        if not self.client:
+            print("Can't list rooms without a nickname!")
+            return
+        for room in chat.list(self.id).wait().rooms:
+            print('{}: {}'.format(room.id, room.name))
 
     def send(self, message):
         if not self.current_room:
@@ -91,36 +127,21 @@ class User(object):
             author=self.nickname,
             content=message,
         )
-        self.last_message = message = chat.sendMessage(
-            self.current_room.name,
+        new_id = self.current_room.room.send(
             message
-        ).wait().new_message
+        ).wait().id
+        message.id = new_id
 
     def print_message(self, message):
         print('{}: {}'.format(message.author, message.content))
 
     def get_room(self, name):
-        self.joined_rooms[name] = room = chat.getRoom(name).wait().room
+        if name in self.joined_rooms:
+            return self.joined_rooms[name]
+        self.joined_rooms[name] = room = chat.join(
+            self.id, name
+        ).wait().room
         return room
-
-    def update_room(self):
-        if not self.current_room or not self.last_message:
-            return
-        results = chat.getMessagesAfter(
-            self.current_room.name, self.last_message
-        ).wait().messages
-        if results:
-            print('\r', end='')
-            new_room = self.current_room.as_builder()
-            new_room.messages = list(new_room.messages) + list(results)
-            self.current_room = new_room.as_reader()
-            for result in results:
-                self.print_message(result)
-            print(commands.prompt(
-                self.current_room.name if self.current_room else None
-            ), end='')
-            sys.stdout.flush()
-            self.last_message = result
 
 
 if __name__ == '__main__':
@@ -130,30 +151,32 @@ if __name__ == '__main__':
         pass
 
     client = capnp.TwoPartyClient(SERVER_ADDRESS)
-    chat = client.bootstrap().cast_as(Chat)
-    commands = Commands()
+    chat = client.bootstrap().cast_as(Server)
+    user = User(chat=chat)
     command_queue = queue.Queue()
     command_lock = threading.Lock()
-    user = User()
+
     def get_input():
         while True:
-            while command_lock.locked():
-                time.sleep(.001)
             try:
-                command_queue.put(
-                    input(commands.prompt(
-                        user.current_room.name if user.current_room else None
-                    ))
-                )
+                with command_lock:
+                    command_queue.put(
+                        input(user.commands.prompt(
+                            user.current_room.name
+                            if user.current_room else None
+                        ))
+                    )
             except EOFError:
                 break
+            time.sleep(.01)
+
     command_thread = threading.Thread(target=get_input)
     command_thread.daemon = True
     quit = False
 
     print('ChatRoom v0.1')
     print('Commands: {}'.format(', '.join([
-        '"%s"' % command for command in commands.list
+        '"%s"' % command for command in user.commands.list
     ])))
     command_thread.start()
 
@@ -168,15 +191,14 @@ if __name__ == '__main__':
 
         if command:
             try:
-                commands.evaluate(command)
+                user.commands.evaluate(command)
             except ValueError as exception:
                 print('ERROR: %s' % exception.message)
 
-        user.update_room()
-
         if command_lock.locked():
             command_lock.release()
-            time.sleep(.01)
+
+        time.sleep(.01)
 
         if not command_thread.is_alive():
             quit = True
