@@ -1,4 +1,5 @@
 import capnp
+import functools
 import glob
 import os
 import uuid
@@ -65,8 +66,15 @@ class Room(Capnp_Room.Server):
     def send(self, message, _context, **kwargs):
         message = message.as_builder()
         self.chatroom.messages.append(message)
+        promises = []
         for client in self.chatroom.users:
-            client.send(message).wait()
+            promises.append(
+                client.send(message).then(
+                    lambda _: None,
+                    error_func=functools.partial(server.handle_error, client),
+                )
+            )
+        return capnp.join_promises(promises)
 
     def names(self, _context, **kwargs):
         return self.chatroom.users
@@ -110,12 +118,6 @@ class Client(object):
         self.joined_rooms = []
 
     def send(self, message):
-        print('Sending message to %s (%d): <%s> %s' % (
-            self.name,
-            self.id,
-            message.author,
-            message.content,
-        ))
         return self._client.receive(message)
 
 
@@ -125,7 +127,6 @@ class Server(Capnp_Server.Server):
         self.rooms = {}
         self.loader = loader = RoomLoader()
         loader.restore_all()
-
 
     def get_room(self, name):
         if name not in self.rooms:
@@ -178,8 +179,18 @@ class Server(Capnp_Server.Server):
 
         self.clients[client_id].name = name
 
+    def handle_error(self, client, exception):
+        if exception.type == exception.Type.DISCONNECTED:
+            for room in client.joined_rooms:
+                room.users.remove(client)
+            del self.clients[client.id]
+            print('Client %s (%d) disconnected.' % (client.name, client.id))
+        else:
+            raise exception
+
 
 if __name__ == '__main__':
     print('Listening on %s' % SERVER_ADDRESS)
-    server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=Server())
-    server.run_forever()
+    server = Server()
+    capnp_server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=server)
+    capnp_server.run_forever()

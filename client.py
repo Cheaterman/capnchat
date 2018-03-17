@@ -29,7 +29,7 @@ class Commands(object):
 
     def evaluate(self, message):
         if message and not message.startswith('/'):
-            user.send(message)
+            self.user.send(message)
             return
         words = message[1:].split()
         if not words:
@@ -67,9 +67,15 @@ class Client(Capnp_Client.Server):
     def __init__(self, user):
         self.user = user
 
-    def receive(self, message):
-        print('Got message: <%s> %s' % (message.author, message.content))
-        self.user.print_message(message)
+    def receive(self, message, _context):
+        user = self.user
+        print('\r', end='')
+        user.print_message(message)
+        print(user.commands.prompt(
+            user.current_room.name
+            if user.current_room else None
+        ), end='')
+        sys.stdout.flush()
 
 
 class User(object):
@@ -181,24 +187,19 @@ if __name__ == '__main__':
     command_thread.start()
 
     while not quit:
-        command_lock.acquire()
-
         try:
             command = command_queue.get(False)
         except queue.Empty:
             command = None
-            command_lock.release()
 
         if command:
-            try:
-                user.commands.evaluate(command)
-            except ValueError as exception:
-                print('ERROR: %s' % exception.message)
+            with command_lock:
+                try:
+                    user.commands.evaluate(command)
+                except ValueError as exception:
+                    print('ERROR: %s' % exception.message)
 
-        if command_lock.locked():
-            command_lock.release()
-
-        time.sleep(.01)
+        capnp.getTimer().after_delay(.01 * 10 ** 9).wait()
 
         if not command_thread.is_alive():
             quit = True
