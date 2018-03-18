@@ -10,7 +10,6 @@ from chatroom_capnp import Client as Capnp_Client, Server, Message
 
 
 SERVER_ADDRESS = 'tms-server.com:50000'
-SERVER_ADDRESS = 'localhost:50000'
 
 
 class Commands(object):
