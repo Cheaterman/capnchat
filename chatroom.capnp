@@ -1,10 +1,12 @@
 @0xfefec1ffd1ff1d03;
 
 interface Server {
-    login @0 (client :Client, name :Text) -> (id :UInt32);
+    login @0 (client :Client, name :Text) -> (id :UInt32, handle :LoginHandle);
     list @1 (client_id :UInt32) -> (rooms :List(ChatRoom));
     join @2 (client_id :UInt32, name :Text) -> (room :ChatRoom);
     nick @3 (client_id :UInt32, name :Text);
+
+    interface LoginHandle {}
 
     struct ChatRoom {
         id @0 :UInt32;
@@ -25,8 +27,8 @@ interface Client {
 
 interface Room {
     get @0 () -> (messages :List(Message));
-    send @1 (message :Message) -> (id :UInt32);
-    names @2 () -> (users :List(Client));
+    send @1 (message :Message);
+    names @2 () -> (users :List(Text));
 }
 
 struct Message {

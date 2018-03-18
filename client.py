@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from __future__ import print_function
 import capnp
 import sys
@@ -94,6 +96,7 @@ class User(object):
                         break
 
         self.id = None
+        self.handle = None
         self.client = None
         self.current_room = None
 
@@ -101,7 +104,8 @@ class User(object):
         self.nickname = name
         if not self.client:
             self.client = client = Client(self)
-            self.id = self.chat.login(client, name).wait().id
+            result = self.chat.login(client, name).wait()
+            self.id, self.handle = result.id, result.handle
         else:
             self.chat.nick(self.client, name).wait()
 
@@ -129,14 +133,10 @@ class User(object):
         if not self.current_room:
             print("Can't send a message without joining a room!")
             return
-        message = Message.new_message(
+        self.current_room.room.send(Message.new_message(
             author=self.nickname,
             content=message,
-        )
-        new_id = self.current_room.room.send(
-            message
-        ).wait().id
-        message.id = new_id
+        )).wait()
 
     def print_message(self, message):
         print('{}: {}'.format(message.author, message.content))

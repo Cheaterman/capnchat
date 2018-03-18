@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import capnp
 import functools
 import glob
@@ -21,11 +23,7 @@ class RoomLoader(object):
         print('Saving room: {}'.format(room.name))
         self.loaded_rooms[room.name] = room
         with open(self.savefile_name(room.name), 'wb') as savefile:
-            room.as_builder().write(savefile)
-
-    def persist_all(self):
-        for room in self.loaded_rooms.values():
-            self.persist(room)
+            room.write(savefile)
 
     def restore(self, name):
         if name in self.loaded_rooms:
@@ -40,7 +38,7 @@ class RoomLoader(object):
                 id=uuid.uuid4().int & 0xFFFFFFFF,
                 name=name,
                 messages=[],
-            ).as_reader()
+            )
         self.loaded_rooms[name] = room
         return room
 
@@ -57,23 +55,25 @@ class RoomLoader(object):
 
 
 class Room(Capnp_Room.Server):
-    def __init__(self, chatroom):
+    def __init__(self, chatroom, server):
         self.chatroom = chatroom
+        self.server = server
 
     def get(self, _context, **kwargs):
         return self.chatroom.messages
 
     def send(self, message, _context, **kwargs):
         message = message.as_builder()
-        self.chatroom.messages.append(message)
+        chatroom = self.chatroom
+        chatroom.messages.append(message)
+        self.server.save_room(chatroom.name)
+
         promises = []
-        for client in self.chatroom.users:
-            promises.append(
-                client.send(message).then(
-                    lambda _: None,
-                    error_func=functools.partial(server.handle_error, client),
-                )
-            )
+        for client in chatroom.users:
+            if client.name == message.author:
+                continue
+            promises.append(client.send(message))
+
         return capnp.join_promises(promises)
 
     def names(self, _context, **kwargs):
@@ -83,7 +83,7 @@ class Room(Capnp_Room.Server):
 class ChatRoom(object):
     def __init__(self, **kwargs):
         if 'room' in kwargs:
-            room = kwargs.pop('room').as_builder()
+            room = kwargs.pop('room')
             id, name, messages = (
                 room.id, room.name, room.messages
             )
@@ -96,11 +96,15 @@ class ChatRoom(object):
                 "__init__() missing 1 required keyword argument: 'room'; "
                 "or 3 required keyword arguments: 'id', 'name', 'messages'"
             )
+        if 'server' not in kwargs:
+            raise TypeError(
+                "__init__() missing 1 required keyword argument: 'server'"
+            )
         self.id = id
         self.name = name
         self.messages = list(messages)
         self.users = []
-        self.room = Room(chatroom=self)
+        self.room = Room(chatroom=self, server=kwargs['server'])
 
     def as_message(self):
         return Capnp_Server.ChatRoom.new_message(
@@ -121,6 +125,15 @@ class Client(object):
         return self._client.receive(message)
 
 
+class Handle(Capnp_Server.LoginHandle.Server):
+    def __init__(self, client, server):
+        self.client = client
+        self.server = server
+
+    def __del__(self):
+        self.server.on_disconnect(self.client)
+
+
 class Server(Capnp_Server.Server):
     def __init__(self, **kwargs):
         self.clients = {}
@@ -130,25 +143,38 @@ class Server(Capnp_Server.Server):
 
     def get_room(self, name):
         if name not in self.rooms:
-            self.rooms[name] = ChatRoom(room=self.loader.restore(name))
+            self.rooms[name] = ChatRoom(
+                room=self.loader.restore(name),
+                server=self
+            )
         return self.rooms[name]
+
+    def save_room(self, name):
+        room = self.rooms[name]
+        self.loader.persist(Capnp_Server.SavedRoom.new_message(
+            id=room.id,
+            name=room.name,
+            messages=room.messages,
+        ))
 
     def login(self, client, name, _context, **kwargs):
         if not name or name in [user.name for user in self.clients.values()]:
-            return
+            raise ValueError(
+                'Invalid username (maybe someone is already using it?)'
+            )
 
         client = Client(name, client)
 
         print('Got new client %s (%d)' % (name, client.id))
 
         self.clients[client.id] = client
-        return client.id
+        return client.id, Handle(client=client, server=self)
 
     class login_required(object):
         def __new__(cls, func):
             def _func(self, client_id, **kwargs):
                 if client_id not in self.clients:
-                    return
+                    raise ValueError('This client ID does not exist.')
                 return func(self, client_id, **kwargs)
             return _func
 
@@ -179,18 +205,14 @@ class Server(Capnp_Server.Server):
 
         self.clients[client_id].name = name
 
-    def handle_error(self, client, exception):
-        if exception.type == exception.Type.DISCONNECTED:
-            for room in client.joined_rooms:
-                room.users.remove(client)
-            del self.clients[client.id]
-            print('Client %s (%d) disconnected.' % (client.name, client.id))
-        else:
-            raise exception
+    def on_disconnect(self, client):
+        for room in client.joined_rooms:
+            room.users.remove(client)
+        del self.clients[client.id]
+        print('Client %s (%d) disconnected.' % (client.name, client.id))
 
 
 if __name__ == '__main__':
     print('Listening on %s' % SERVER_ADDRESS)
-    server = Server()
-    capnp_server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=server)
+    capnp_server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=Server())
     capnp_server.run_forever()
