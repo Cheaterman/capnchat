@@ -6,9 +6,10 @@ import glob
 import os
 import uuid
 from chatroom_capnp import (
+    Message as Capnp_Message,
+    Login as Capnp_Login,
     Client as Capnp_Client,
-    Server as Capnp_Server,
-    Room as Capnp_Room,
+    ChatServer as Capnp_ChatServer,
 )
 
 
@@ -31,10 +32,10 @@ class RoomLoader(object):
         savefile_name = self.savefile_name(name)
         if os.path.exists(savefile_name):
             print('Loading room: {}'.format(name))
-            room = Capnp_Server.SavedRoom.read(open(savefile_name, 'rb'))
+            room = Capnp_ChatServer.SavedRoom.read(open(savefile_name, 'rb'))
         else:
             print('New room: {}'.format(name))
-            room = Capnp_Server.SavedRoom.new_message(
+            room = Capnp_ChatServer.SavedRoom.new_message(
                 id=uuid.uuid4().int & 0xFFFFFFFF,
                 name=name,
                 messages=[],
@@ -54,7 +55,7 @@ class RoomLoader(object):
         return name + '.chatroom.sav'
 
 
-class Room(Capnp_Room.Server):
+class Room(Capnp_ChatServer.Room.Server):
     def __init__(self, chatroom, server):
         self.chatroom = chatroom
         self.server = server
@@ -102,46 +103,97 @@ class ChatRoom(object):
             )
         self.id = id
         self.name = name
-        self.messages = list(messages)
+        self.messages = [
+            Capnp_Message.new_message(
+                author=message.author,
+                content=message.content,
+            )
+            for message in messages
+        ]
         self.users = []
         self.room = Room(chatroom=self, server=kwargs['server'])
 
-    def as_message(self):
-        return Capnp_Server.ChatRoom.new_message(
-            id=self.id,
-            name=self.name,
-            room=self.room,
-        )
+    def join(self, client):
+        if self not in client.joined_rooms:
+            client.joined_rooms.append(self)
+
+        if client not in self.users:
+            self.users.append(client)
 
 
 class Client(object):
-    def __init__(self, name, client):
-        self.id = uuid.uuid4().int & 0xFFFFFFFF
+    def __init__(self, client, name, handle):
+        self.client = client
         self.name = name
-        self._client = client
+        self._chat_handle = handle
         self.joined_rooms = []
 
     def send(self, message):
-        return self._client.receive(message)
+        return self._chat_handle.receive(message)
 
 
-class Handle(Capnp_Server.LoginHandle.Server):
-    def __init__(self, client, server):
+class ChatServer(Capnp_ChatServer.Server):
+    def __init__(self, client):
         self.client = client
-        self.server = server
+
+    def list(self, _context, **kwargs):
+        return list(server.rooms.keys())
+
+    def join(self, name, _context, **kwargs):
+        chatroom = server.load_room(name)
+        chatroom.join(self.client)
+        return chatroom.room
+
+    def nick(self, name, _context, **kwargs):
+        if not server.validate_nickname(name):
+            raise ValueError(
+                'Invalid username (maybe someone is already using it?)'
+            )
+        self.client.name = name
+
+
+class Login(Capnp_Login.Server):
+    def login(self, client, name, _context, **kwargs):
+        if not name or not server.validate_login(self.client, name):
+            raise ValueError(
+                'Invalid username (maybe someone is already using it?)'
+            )
+
+        print('New user login from %s' % name)
+        return server.login(client, name, self)
+
+    def on_connect(self, client):
+        print('New connection from %s:%d' % client)
+        self.client = client
+
+    def on_disconnect(self):
+        print('Client %s (%s:%d) disconnected.' % (
+            (server.clients[self.client].name,) + self.client
+        ))
+        server.logout(self.client)
+
+
+class LoginHandle(Capnp_Login.LoginHandle.Server):
+    def __init__(self, login):
+        self.login = login
 
     def __del__(self):
-        self.server.on_disconnect(self.client)
+        self.login.on_disconnect()
 
 
-class Server(Capnp_Server.Server):
-    def __init__(self, **kwargs):
+class CapnChat(object):
+    def __init__(self):
         self.clients = {}
-        self.rooms = {}
         self.loader = loader = RoomLoader()
-        loader.restore_all()
+        self.rooms = {
+            room.name: ChatRoom(
+                room=room,
+                server=self,
+            )
+            for room in loader.restore_all()
+        }
 
-    def get_room(self, name):
+    def load_room(self, name):
         if name not in self.rooms:
             self.rooms[name] = ChatRoom(
                 room=self.loader.restore(name),
@@ -151,68 +203,46 @@ class Server(Capnp_Server.Server):
 
     def save_room(self, name):
         room = self.rooms[name]
-        self.loader.persist(Capnp_Server.SavedRoom.new_message(
+        self.loader.persist(Capnp_ChatServer.SavedRoom.new_message(
             id=room.id,
             name=room.name,
-            messages=room.messages,
+            messages=[
+                Capnp_ChatServer.SavedMessage.new_message(
+                    author=message.author,
+                    content=message.content,
+                )
+                for message in room.messages
+            ]
         ))
 
-    def login(self, client, name, _context, **kwargs):
-        if not name or name in [user.name for user in self.clients.values()]:
-            raise ValueError(
-                'Invalid username (maybe someone is already using it?)'
-            )
+    def validate_login(self, client, name):
+        if(
+            client in [user.client for user in self.clients.values()] or
+            not self.validate_nickname(name)
+        ):
+            return False
+        return True
 
-        client = Client(name, client)
+    def validate_nickname(self, name):
+        if name in [user.name for user in self.clients.values()]:
+            return False
+        return True
 
-        print('Got new client %s (%d)' % (name, client.id))
+    def login(self, client, name, login):
+        client_handle = Client(login.client, name, client)
+        self.clients[login.client] = client_handle
 
-        self.clients[client.id] = client
-        return client.id, Handle(client=client, server=self)
+        return ChatServer(client=client_handle), LoginHandle(login=login)
 
-    class login_required(object):
-        def __new__(cls, func):
-            def _func(self, client_id, **kwargs):
-                if client_id not in self.clients:
-                    raise ValueError('This client ID does not exist.')
-                return func(self, client_id, **kwargs)
-            return _func
-
-    @login_required
-    def list(self, client_id, _context, **kwargs):
-        return [
-            self.get_room(saved_room.name).as_message()
-            for saved_room in self.loader.restore_all()
-        ]
-
-    @login_required
-    def join(self, client_id, name, _context, **kwargs):
-        chatroom = self.get_room(name)
-        proxy_client = self.clients[client_id]
-
-        if chatroom not in proxy_client.joined_rooms:
-            proxy_client.joined_rooms.append(chatroom)
-
-        if proxy_client not in chatroom.users:
-            chatroom.users.append(proxy_client)
-
-        return chatroom.as_message()
-
-    @login_required
-    def nick(self, client_id, name, _context, **kwargs):
-        if not name:
-            return
-
-        self.clients[client_id].name = name
-
-    def on_disconnect(self, client):
-        for room in client.joined_rooms:
-            room.users.remove(client)
-        del self.clients[client.id]
-        print('Client %s (%d) disconnected.' % (client.name, client.id))
+    def logout(self, client):
+        client_handle = self.clients[client]
+        for room in client_handle.joined_rooms:
+            room.users.remove(client_handle)
+        del self.clients[client]
 
 
 if __name__ == '__main__':
     print('Listening on %s' % SERVER_ADDRESS)
-    capnp_server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=Server())
+    server = CapnChat()
+    capnp_server = capnp.TwoPartyServer(SERVER_ADDRESS, bootstrap=Login)
     capnp_server.run_forever()
