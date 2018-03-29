@@ -137,10 +137,7 @@ class User(object):
         if not self.current_room:
             print("Can't send a message without joining a room!")
             return
-        self.current_room.send(Message.new_message(
-            author=self.nickname,
-            content=message,
-        )).wait()
+        self.current_room.send(message).wait()
 
     def print_message(self, message):
         print('{}: {}'.format(message.author, message.content))

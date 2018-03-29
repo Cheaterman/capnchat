@@ -56,22 +56,27 @@ class RoomLoader(object):
 
 
 class Room(Capnp_ChatServer.Room.Server):
-    def __init__(self, chatroom, server):
+    def __init__(self, chatroom, chatserver, server):
         self.chatroom = chatroom
+        self.chatserver = chatserver
+        self.client = chatserver.client
         self.server = server
 
     def get(self, _context, **kwargs):
         return self.chatroom.messages
 
-    def send(self, message, _context, **kwargs):
-        message = message.as_builder()
+    def send(self, text, _context, **kwargs):
+        message = Capnp_Message.new_message(
+            author=self.client.name,
+            content=text,
+        )
         chatroom = self.chatroom
         chatroom.messages.append(message)
         self.server.save_room(chatroom.name)
 
         promises = []
         for client in chatroom.users:
-            if client.name == message.author:
+            if client.name == self.client.name:
                 continue
             promises.append(client.send(message))
 
@@ -97,10 +102,6 @@ class ChatRoom(object):
                 "__init__() missing 1 required keyword argument: 'room'; "
                 "or 3 required keyword arguments: 'id', 'name', 'messages'"
             )
-        if 'server' not in kwargs:
-            raise TypeError(
-                "__init__() missing 1 required keyword argument: 'server'"
-            )
         self.id = id
         self.name = name
         self.messages = [
@@ -111,7 +112,6 @@ class ChatRoom(object):
             for message in messages
         ]
         self.users = []
-        self.room = Room(chatroom=self, server=kwargs['server'])
 
     def join(self, client):
         if self not in client.joined_rooms:
@@ -122,19 +122,20 @@ class ChatRoom(object):
 
 
 class Client(object):
-    def __init__(self, client, name, handle):
+    def __init__(self, client, name, client_handle):
         self.client = client
         self.name = name
-        self._chat_handle = handle
+        self._client_handle = client_handle
         self.joined_rooms = []
 
     def send(self, message):
-        return self._chat_handle.receive(message)
+        return self._client_handle.receive(message)
 
 
 class ChatServer(Capnp_ChatServer.Server):
-    def __init__(self, client):
+    def __init__(self, client, server):
         self.client = client
+        self.server = server
 
     def list(self, _context, **kwargs):
         return list(server.rooms.keys())
@@ -142,7 +143,11 @@ class ChatServer(Capnp_ChatServer.Server):
     def join(self, name, _context, **kwargs):
         chatroom = server.load_room(name)
         chatroom.join(self.client)
-        return chatroom.room
+        return Room(
+            chatroom=chatroom,
+            chatserver=self,
+            server=self.server,
+        )
 
     def nick(self, name, _context, **kwargs):
         if not server.validate_nickname(name):
@@ -153,14 +158,17 @@ class ChatServer(Capnp_ChatServer.Server):
 
 
 class Login(Capnp_Login.Server):
+    def __init__(self):
+        self.server = server
+
     def login(self, client, name, _context, **kwargs):
-        if not name or not server.validate_login(self.client, name):
+        if not name or not self.server.validate_login(self.client, name):
             raise ValueError(
                 'Invalid username (maybe someone is already using it?)'
             )
 
         print('New user login from %s' % name)
-        return server.login(client, name, self)
+        return self.server.login(client, name, self)
 
     def on_connect(self, client):
         print('New connection from %s:%d' % client)
@@ -168,9 +176,9 @@ class Login(Capnp_Login.Server):
 
     def on_disconnect(self):
         print('Client %s (%s:%d) disconnected.' % (
-            (server.clients[self.client].name,) + self.client
+            (self.server.clients[self.client].name,) + self.client
         ))
-        server.logout(self.client)
+        self.server.logout(self.client)
 
 
 class LoginHandle(Capnp_Login.LoginHandle.Server):
@@ -186,19 +194,13 @@ class CapnChat(object):
         self.clients = {}
         self.loader = loader = RoomLoader()
         self.rooms = {
-            room.name: ChatRoom(
-                room=room,
-                server=self,
-            )
+            room.name: ChatRoom(room=room)
             for room in loader.restore_all()
         }
 
     def load_room(self, name):
         if name not in self.rooms:
-            self.rooms[name] = ChatRoom(
-                room=self.loader.restore(name),
-                server=self
-            )
+            self.rooms[name] = ChatRoom(room=self.loader.restore(name))
         return self.rooms[name]
 
     def save_room(self, name):
@@ -228,11 +230,11 @@ class CapnChat(object):
             return False
         return True
 
-    def login(self, client, name, login):
-        client_handle = Client(login.client, name, client)
-        self.clients[login.client] = client_handle
+    def login(self, client_handle, name, login):
+        client = Client(login.client, name, client_handle)
+        self.clients[login.client] = client
 
-        return ChatServer(client=client_handle), LoginHandle(login=login)
+        return ChatServer(client=client, server=self), LoginHandle(login=login)
 
     def logout(self, client):
         client_handle = self.clients[client]

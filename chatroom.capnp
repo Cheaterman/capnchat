@@ -22,7 +22,7 @@ interface ChatServer {
 
     interface Room {
         get @0 () -> (messages :List(Message));
-        send @1 (message :Message);
+        send @1 (text :Text);
         names @2 () -> (users :List(Text));
     }
 
