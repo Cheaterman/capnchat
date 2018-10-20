@@ -162,7 +162,7 @@ class Login(Capnp_Login.Server):
         self.server = server
 
     def login(self, client, name, _context, **kwargs):
-        if not name or not self.server.validate_login(self.client, name):
+        if not self.server.validate_login(self.client, name):
             raise ValueError(
                 'Invalid username (maybe someone is already using it?)'
             )
@@ -226,7 +226,7 @@ class CapnChat(object):
         return True
 
     def validate_nickname(self, name):
-        if name in [user.name for user in self.clients.values()]:
+        if not name or name in [user.name for user in self.clients.values()]:
             return False
         return True
 
